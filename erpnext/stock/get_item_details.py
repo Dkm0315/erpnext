@@ -290,10 +290,17 @@ def process_args(args):
 	if isinstance(args, str):
 		args = json.loads(args)
 
+<<<<<<< HEAD
 	args = frappe._dict(args)
 
 	if not args.get("price_list"):
 		args.price_list = args.get("selling_price_list") or args.get("buying_price_list")
+=======
+	elif out.get("warehouse"):
+		bin_details = get_bin_details(
+			ctx.item_code, out.warehouse, ctx.company, include_child_warehouses=True
+		)
+>>>>>>> ab30bab6cb (fix(stock): show qty (company) and qty (warehouse) in sales transactions)
 
 	if not args.item_code and args.barcode:
 		args.item_code = get_item_code(barcode=args.barcode)
