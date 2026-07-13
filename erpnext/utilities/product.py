@@ -7,22 +7,14 @@ from frappe.utils import cint, cstr, flt, fmt_money
 from erpnext.accounts.doctype.pricing_rule.pricing_rule import get_pricing_rule_for_item
 
 
-def get_price(item_code, price_list, customer_group, company, qty=1, party=None):
+def get_price(item_code, price_list, customer_group, company, qty=1, party=None, transaction_date=None):
 	template_item_code = frappe.db.get_value("Item", item_code, "variant_of")
 
 	if price_list:
-		price = frappe.get_all(
-			"Item Price",
-			fields=["price_list_rate", "currency"],
-			filters={"price_list": price_list, "item_code": item_code},
-		)
+		price = _get_price_list_rate(item_code, price_list, transaction_date)
 
 		if template_item_code and not price:
-			price = frappe.get_all(
-				"Item Price",
-				fields=["price_list_rate", "currency"],
-				filters={"price_list": price_list, "item_code": template_item_code},
-			)
+			price = _get_price_list_rate(template_item_code, price_list, transaction_date)
 
 		if price:
 			pricing_rule_dict = frappe._dict(
@@ -108,6 +100,32 @@ def get_price(item_code, price_list, customer_group, company, qty=1, party=None)
 					price_obj["formatted_price"], price_obj["formatted_mrp"] = "", ""
 
 			return price_obj
+
+
+def _get_price_list_rate(item_code, price_list, transaction_date=None):
+	if not transaction_date:
+		return frappe.get_all(
+			"Item Price",
+			fields=["price_list_rate", "currency"],
+			filters={"price_list": price_list, "item_code": item_code},
+		)
+
+	item_price = frappe.qb.DocType("Item Price")
+	return (
+		frappe.qb.from_(item_price)
+		.select(item_price.price_list_rate, item_price.currency)
+		.where(
+			(item_price.price_list == price_list)
+			& (item_price.item_code == item_code)
+			& (item_price.valid_from.isnull() | (item_price.valid_from <= transaction_date))
+			& (item_price.valid_upto.isnull() | (item_price.valid_upto >= transaction_date))
+		)
+		.orderby(item_price.valid_from.isnull(), order=frappe.qb.asc)
+		.orderby(item_price.valid_from, order=frappe.qb.desc)
+		.orderby(item_price.creation, order=frappe.qb.desc)
+		.orderby(item_price.name, order=frappe.qb.desc)
+		.limit(1)
+	).run(as_dict=True)
 
 
 def get_item_codes_by_attributes(attribute_filters, template_item_code=None):

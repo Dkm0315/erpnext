@@ -1,11 +1,13 @@
 # Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.utils import flt
 
 from erpnext.tests.utils import ERPNextTestSuite
-from erpnext.utilities.product import get_price
+from erpnext.utilities.product import _get_price_list_rate, get_price
 
 
 class TestProductUtil(ERPNextTestSuite):
@@ -100,4 +102,16 @@ class TestProductUtil(ERPNextTestSuite):
 			price["formatted_price_sales_uom"],
 			price["formatted_price"],
 			msg="factor should default to 1 when no UOM Conversion Detail matches sales_uom",
+		)
+
+	def test_undated_price_lookup_keeps_legacy_query(self):
+		expected = [frappe._dict(price_list_rate=200, currency="INR")]
+		with patch("erpnext.utilities.product.frappe.get_all", return_value=expected) as get_all:
+			price = _get_price_list_rate(self.ITEM_CODE, self.PRICE_LIST)
+
+		self.assertEqual(price, expected)
+		get_all.assert_called_once_with(
+			"Item Price",
+			fields=["price_list_rate", "currency"],
+			filters={"price_list": self.PRICE_LIST, "item_code": self.ITEM_CODE},
 		)

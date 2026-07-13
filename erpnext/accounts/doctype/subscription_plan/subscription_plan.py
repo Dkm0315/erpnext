@@ -69,6 +69,7 @@ def get_plan_rate(
 			company=None,
 			qty=quantity,
 			party=party,
+			transaction_date=start_date,
 		)
 		if not price:
 			return 0
