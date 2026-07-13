@@ -73,7 +73,7 @@ class TestSubscriptionPlan(ERPNextTestSuite):
 
 	def test_price_list_rate_uses_billing_period_start(self):
 		plan = self.make_price_list_plan(
-			{"price_list_rate": 190, "valid_upto": "2026-12-31"},
+			{"price_list_rate": 190, "valid_from": "2026-01-01", "valid_upto": "2026-12-31"},
 			{"price_list_rate": 195, "valid_from": "2027-01-01"},
 		)
 
