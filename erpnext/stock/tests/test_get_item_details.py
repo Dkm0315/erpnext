@@ -35,6 +35,7 @@ class TestGetItemDetail(FrappeTestCase):
 		details = get_item_details(args)
 		self.assertEqual(details.get("price_list_rate"), 100)
 
+<<<<<<< HEAD
 	def test_fetch_asset_category_expense_account_on_purchase_receipt(self):
 		from erpnext.stock.doctype.item.test_item import make_item
 
@@ -74,12 +75,46 @@ class TestGetItemDetail(FrappeTestCase):
 				"doctype": "Purchase Receipt",
 				"supplier": "_Test Supplier",
 				"price_list": "_Test Buying Price List",
+=======
+	def test_bin_details_for_selling_doctypes(self):
+		from erpnext.stock.doctype.item.test_item import make_item
+		from erpnext.stock.doctype.purchase_receipt.test_purchase_receipt import make_purchase_receipt
+
+		item_code = make_item(properties={"is_stock_item": 1}).name
+
+		make_purchase_receipt(item_code=item_code, warehouse="_Test Warehouse - _TC", qty=100, rate=100)
+		make_purchase_receipt(item_code=item_code, warehouse="_Test Warehouse 1 - _TC", qty=50, rate=100)
+
+		args = frappe._dict(
+			{
+				"item_code": item_code,
+				"warehouse": "_Test Warehouse - _TC",
+				"company": "_Test Company",
+				"customer": "_Test Customer",
+				"currency": "INR",
+				"conversion_rate": 1.0,
+				"price_list": "_Test Price List",
+				"price_list_currency": "INR",
+				"plc_conversion_rate": 1.0,
+				"transaction_date": None,
+				"name": None,
+>>>>>>> 4e5e1f6596 (test(stock): assert qty (company) and qty (warehouse) on item details)
 				"ignore_pricing_rule": 1,
 				"qty": 1,
 			}
 		)
+<<<<<<< HEAD
 		details = get_item_details(args)
 		self.assertEqual(details.get("expense_account"), "_Test Fixed Asset - _TC")
+=======
+
+		for doctype in ("Sales Order", "Quotation", "Sales Invoice", "Delivery Note", "Purchase Order"):
+			with self.subTest(doctype=doctype):
+				details = get_item_details(args.copy().update({"doctype": doctype}))
+
+				self.assertEqual(details.get("actual_qty"), 100)
+				self.assertEqual(details.get("company_total_stock"), 150)
+>>>>>>> 4e5e1f6596 (test(stock): assert qty (company) and qty (warehouse) on item details)
 
 	# making this test in get_item_details test file as feat/fix is present in that method
 	def test_fetch_price_from_list_rate_on_doc_save(self):
