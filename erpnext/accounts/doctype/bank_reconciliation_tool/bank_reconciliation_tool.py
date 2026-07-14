@@ -795,6 +795,7 @@ def create_bulk_payment_entry_and_reconcile(
 				"date",
 				"reference_number",
 				"description",
+				"company",
 			],
 			as_dict=True,
 		)

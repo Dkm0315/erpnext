@@ -8,6 +8,7 @@ from frappe.utils import add_days, today
 
 from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
 	auto_reconcile_vouchers,
+	create_bulk_payment_entry_and_reconcile,
 	get_auto_reconcile_message,
 	get_bank_transactions,
 )
@@ -99,7 +100,7 @@ class TestBankReconciliationTool(ERPNextTestSuite, AccountsTestMixin):
 		transactions = get_bank_transactions(self.bank_account, from_date, to_date)
 		self.assertEqual(len(transactions), 0)
 
-	def make_bank_transaction(self, date, deposit=100):
+	def make_bank_transaction(self, date, deposit=100, reference_number=None):
 		return (
 			frappe.get_doc(
 				{
@@ -108,11 +109,47 @@ class TestBankReconciliationTool(ERPNextTestSuite, AccountsTestMixin):
 					"deposit": deposit,
 					"bank_account": self.bank_account,
 					"currency": "INR",
+					"reference_number": reference_number,
 				}
 			)
 			.save()
 			.submit()
 		)
+
+	def test_bulk_payment_entry_uses_bank_transaction_company(self):
+		bank_transaction = self.make_bank_transaction(
+			date=today(), reference_number="BULK-RECONCILIATION-TEST"
+		)
+		self.assertEqual(bank_transaction.company, self.company)
+
+		original_default_company = frappe.db.get_value(
+			"DefaultValue", {"parent": frappe.session.user, "defkey": "company"}, "defvalue"
+		)
+		frappe.defaults.set_user_default("company", "_Test Company 1")
+		self.assertEqual(frappe.defaults.get_user_default("Company"), "_Test Company 1")
+		try:
+			result = create_bulk_payment_entry_and_reconcile(
+				bank_transaction_names=[bank_transaction.name],
+				party_type="Customer",
+				party=self.customer,
+				account=self.debit_to,
+			)
+		finally:
+			if original_default_company:
+				frappe.defaults.set_user_default("company", original_default_company)
+			else:
+				frappe.defaults.clear_default("company", parent=frappe.session.user)
+
+		self.assertEqual(len(result), 1)
+		payment_entry = result[0]["payment_entry"]
+		self.assertEqual(payment_entry.company, self.company)
+		self.assertEqual(payment_entry.payment_type, "Receive")
+		self.assertEqual(payment_entry.docstatus, 1)
+
+		bank_transaction.reload()
+		self.assertEqual(bank_transaction.unallocated_amount, 0)
+		self.assertEqual(bank_transaction.payment_entries[0].payment_document, "Payment Entry")
+		self.assertEqual(bank_transaction.payment_entries[0].payment_entry, payment_entry.name)
 
 	def test_get_bank_transactions_excludes_dates_after_to_date(self):
 		self.make_bank_transaction(date=today())
