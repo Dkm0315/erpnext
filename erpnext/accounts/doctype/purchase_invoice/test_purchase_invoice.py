@@ -1995,6 +1995,268 @@ class TestPurchaseInvoice(ERPNextTestSuite, StockTestMixin):
 
 		toggle_provisional_accounting_setting()
 
+	@ERPNextTestSuite.change_settings(
+		"Buying Settings", {"maintain_same_rate": 0, "set_landed_cost_based_on_purchase_invoice_rate": 1}
+	)
+	def test_adjust_incoming_rate_includes_pi_valuation_charge(self):
+		"""Valuation freight added on a linked PI must be capitalized by the original PR."""
+		company = "_Test Company with perpetual inventory"
+		warehouse = "Stores - TCP1"
+		cost_center = "Main - TCP1"
+
+		pr = make_purchase_receipt(
+			qty=10,
+			rate=100,
+			company=company,
+			warehouse=warehouse,
+			cost_center=cost_center,
+		)
+		pi = create_purchase_invoice_from_receipt(pr.name)
+		pi.append(
+			"taxes",
+			{
+				"charge_type": "Actual",
+				"account_head": "_Test Account Shipping Charges - TCP1",
+				"category": "Valuation and Total",
+				"add_deduct_tax": "Add",
+				"tax_amount": 100,
+				"description": "Freight added at Purchase Invoice",
+				"cost_center": cost_center,
+			},
+		)
+		pi.submit()
+
+		pr.reload()
+		sle = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_type": "Purchase Receipt", "voucher_no": pr.name, "is_cancelled": 0},
+			["incoming_rate", "stock_value_difference"],
+			as_dict=True,
+		)
+
+		self.assertEqual(pi.items[0].item_tax_amount, 100)
+		self.assertEqual(pr.items[0].amount_difference_with_purchase_invoice, 100)
+		self.assertEqual(pr.items[0].valuation_rate, 110)
+		self.assertEqual(sle.incoming_rate, 110)
+		self.assertEqual(sle.stock_value_difference, 1100)
+
+		def get_gl_map(voucher_type, voucher_no):
+			gl_entries = frappe.get_all(
+				"GL Entry",
+				filters={
+					"voucher_type": voucher_type,
+					"voucher_no": voucher_no,
+					"is_cancelled": 0,
+				},
+				fields=["account", "debit", "credit"],
+			)
+			self.assertTrue(gl_entries)
+			self.assertEqual(sum(row.debit for row in gl_entries), sum(row.credit for row in gl_entries))
+
+			gl_map = {}
+			for row in gl_entries:
+				account = gl_map.setdefault(row.account, {"debit": 0, "credit": 0})
+				account["debit"] += row.debit
+				account["credit"] += row.credit
+			return gl_map
+
+		pr_gl = get_gl_map("Purchase Receipt", pr.name)
+		self.assertEqual(pr_gl["Stock In Hand - TCP1"], {"debit": 1100, "credit": 0})
+		self.assertEqual(pr_gl["Stock Received But Not Billed - TCP1"], {"debit": 0, "credit": 1100})
+
+		pi_gl = get_gl_map("Purchase Invoice", pi.name)
+		self.assertEqual(pi_gl["Creditors - TCP1"], {"debit": 0, "credit": 1100})
+		self.assertEqual(pi_gl["Stock Received But Not Billed - TCP1"], {"debit": 1100, "credit": 0})
+		self.assertEqual(pi_gl["_Test Account Shipping Charges - TCP1"], {"debit": 100, "credit": 100})
+
+		pi.reload()
+		pi.cancel()
+		pr.reload()
+		sle = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_type": "Purchase Receipt", "voucher_no": pr.name, "is_cancelled": 0},
+			["incoming_rate", "stock_value_difference"],
+			as_dict=True,
+		)
+		self.assertEqual(pr.items[0].amount_difference_with_purchase_invoice, 0)
+		self.assertEqual(pr.items[0].valuation_rate, 100)
+		self.assertEqual(sle.incoming_rate, 100)
+		self.assertEqual(sle.stock_value_difference, 1000)
+
+		pr_gl = get_gl_map("Purchase Receipt", pr.name)
+		self.assertEqual(pr_gl["Stock In Hand - TCP1"], {"debit": 1000, "credit": 0})
+		self.assertEqual(pr_gl["Stock Received But Not Billed - TCP1"], {"debit": 0, "credit": 1000})
+
+	@ERPNextTestSuite.change_settings(
+		"Buying Settings", {"maintain_same_rate": 0, "set_landed_cost_based_on_purchase_invoice_rate": 1}
+	)
+	def test_adjust_incoming_rate_preserves_inclusive_pr_valuation_charge(self):
+		"""Use net company-currency amounts when PR and PI share an inclusive valuation tax."""
+		company = "_Test Company with perpetual inventory"
+		warehouse = "Stores - TCP1"
+		cost_center = "Main - TCP1"
+
+		pr = make_purchase_receipt(
+			qty=10,
+			rate=110,
+			company=company,
+			warehouse=warehouse,
+			cost_center=cost_center,
+			do_not_submit=1,
+		)
+		pr.append(
+			"taxes",
+			{
+				"charge_type": "On Net Total",
+				"account_head": "_Test Account Shipping Charges - TCP1",
+				"category": "Valuation and Total",
+				"add_deduct_tax": "Add",
+				"included_in_print_rate": 1,
+				"rate": 10,
+				"description": "Inclusive freight already capitalized by Purchase Receipt",
+				"cost_center": cost_center,
+			},
+		)
+		pr.submit()
+
+		pi = create_purchase_invoice_from_receipt(pr.name)
+		pi.set("taxes", [])
+		pi.append(
+			"taxes",
+			{
+				"charge_type": "On Net Total",
+				"account_head": "_Test Account Shipping Charges - TCP1",
+				"category": "Valuation and Total",
+				"add_deduct_tax": "Add",
+				"included_in_print_rate": 1,
+				"rate": 10,
+				"description": "Same inclusive freight on Purchase Invoice",
+				"cost_center": cost_center,
+			},
+		)
+		pi.submit()
+
+		pr.reload()
+		sle = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_type": "Purchase Receipt", "voucher_no": pr.name, "is_cancelled": 0},
+			["incoming_rate", "stock_value_difference"],
+			as_dict=True,
+		)
+
+		self.assertAlmostEqual(pr.items[0].base_net_amount, 1000, places=2)
+		self.assertAlmostEqual(pr.items[0].item_tax_amount, 100, places=2)
+		self.assertAlmostEqual(pi.items[0].base_net_amount, 1000, places=2)
+		self.assertAlmostEqual(pi.items[0].item_tax_amount, 100, places=2)
+		self.assertEqual(pr.items[0].amount_difference_with_purchase_invoice, 0)
+		self.assertEqual(pr.items[0].valuation_rate, 110)
+		self.assertEqual(sle.incoming_rate, 110)
+		self.assertEqual(sle.stock_value_difference, 1100)
+		self.assertEqual(
+			sum(
+				row.debit
+				for row in frappe.get_all(
+					"GL Entry",
+					filters={
+						"voucher_type": "Purchase Invoice",
+						"voucher_no": pi.name,
+						"account": "Stock Received But Not Billed - TCP1",
+						"is_cancelled": 0,
+					},
+					fields=["debit"],
+				)
+			),
+			1000,
+		)
+
+	@ERPNextTestSuite.change_settings(
+		"Buying Settings", {"maintain_same_rate": 0, "set_landed_cost_based_on_purchase_invoice_rate": 1}
+	)
+	def test_adjust_incoming_rate_includes_pi_tax_with_unrelated_pr_valuation(self):
+		"""Unrelated PR tax and LCV accounts must not suppress new PI freight capitalization."""
+		from erpnext.stock.doctype.landed_cost_voucher.test_landed_cost_voucher import (
+			make_landed_cost_voucher,
+		)
+
+		company = "_Test Company with perpetual inventory"
+		warehouse = "Stores - TCP1"
+		cost_center = "Main - TCP1"
+		pr = make_purchase_receipt(
+			qty=10,
+			rate=100,
+			company=company,
+			warehouse=warehouse,
+			cost_center=cost_center,
+			do_not_submit=True,
+		)
+		pr.append(
+			"taxes",
+			{
+				"charge_type": "On Net Total",
+				"account_head": "_Test Account Excise Duty - TCP1",
+				"category": "Valuation and Total",
+				"add_deduct_tax": "Add",
+				"rate": 10,
+				"description": "Existing duty on Purchase Receipt",
+				"cost_center": cost_center,
+			},
+		)
+		pr.submit()
+		make_landed_cost_voucher(
+			company=company,
+			receipt_document_type="Purchase Receipt",
+			receipt_document=pr.name,
+			charges=100,
+			expense_account="Expenses Included In Valuation - TCP1",
+		)
+
+		pi = create_purchase_invoice_from_receipt(pr.name)
+		pi.set("taxes", [])
+		pi.append(
+			"taxes",
+			{
+				"charge_type": "Actual",
+				"account_head": "_Test Account Shipping Charges - TCP1",
+				"category": "Valuation and Total",
+				"add_deduct_tax": "Add",
+				"tax_amount": 50,
+				"description": "New PI-only freight on an unrelated account",
+				"cost_center": cost_center,
+			},
+		)
+		pi.submit()
+
+		pr.reload()
+		sle = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_type": "Purchase Receipt", "voucher_no": pr.name, "is_cancelled": 0},
+			["incoming_rate", "stock_value_difference"],
+			as_dict=True,
+		)
+		self.assertEqual(pr.items[0].item_tax_amount, 100)
+		self.assertEqual(pr.items[0].landed_cost_voucher_amount, 100)
+		self.assertEqual(pi.items[0].item_tax_amount, 50)
+		self.assertEqual(pr.items[0].amount_difference_with_purchase_invoice, 50)
+		self.assertEqual(pr.items[0].valuation_rate, 125)
+		self.assertEqual(sle.incoming_rate, 125)
+		self.assertEqual(sle.stock_value_difference, 1250)
+		self.assertEqual(
+			sum(
+				row.debit
+				for row in frappe.get_all(
+					"GL Entry",
+					filters={
+						"voucher_type": "Purchase Invoice",
+						"voucher_no": pi.name,
+						"account": "Stock Received But Not Billed - TCP1",
+						"is_cancelled": 0,
+					},
+					fields=["debit"],
+				)
+			),
+			1050,
+		)
+
 	def test_adjust_incoming_rate(self):
 		frappe.db.set_single_value("Buying Settings", "maintain_same_rate", 0)
 

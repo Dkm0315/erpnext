@@ -13,6 +13,12 @@ from frappe.query_builder.functions import CombineDatetime
 from frappe.utils import flt
 from pypika import functions as fn
 
+import erpnext
+from erpnext.accounts.doctype.purchase_invoice.services.valuation_adjustment import (
+	get_active_pr_gl_accounts,
+	get_srbnb_reclassified_valuation_tax,
+)
+
 
 class BillingStatusService:
 	def __init__(self, doc):
@@ -231,7 +237,9 @@ def update_billing_percentage(
 
 				billed_amt = item.billed_amt
 				if billed_qty_amt.get(item.name):
-					billed_amt = flt(billed_qty_amt.get(item.name).get("amount"))
+					billed_details = billed_qty_amt.get(item.name)
+					billed_amt = flt(billed_details.get("amount"))
+					billed_amt += flt(billed_details.get("item_tax_amount"))
 				elif billed_qty_amt_based_on_po.get(item.purchase_order_item):
 					total_billed_qty = (
 						billed_qty_amt_based_on_po.get(item.purchase_order_item).get("qty") + qty
@@ -249,9 +257,9 @@ def update_billing_percentage(
 					billed_qty_amt_based_on_po[item.purchase_order_item]["amount"] -= billed_amt
 
 				if qty:
-					adjusted_amt = (
-						flt(billed_amt / qty) - (flt(item.rate) * flt(pr_doc.conversion_rate))
-					) * item.qty
+					pr_item_valuation_rate = flt(item.base_net_rate)
+
+					adjusted_amt = (flt(billed_amt / qty) - pr_item_valuation_rate) * item.qty
 
 			adjusted_amt = flt(adjusted_amt, item.precision("amount"))
 			pi_landed_cost_amount += adjusted_amt
@@ -291,25 +299,79 @@ def get_billed_qty_amount_against_purchase_receipt(pr_doc) -> dict:
 		.inner_join(table)
 		.on(parent_table.name == table.parent)
 		.select(
+			parent_table.name.as_("purchase_invoice"),
+			parent_table.is_opening,
+			table.purchase_receipt,
 			table.pr_detail,
+			table.item_code,
 			fn.Sum(table.base_net_amount).as_("amount"),
+			fn.Sum(table.item_tax_amount).as_("item_tax_amount"),
 			fn.Sum(table.qty).as_("qty"),
 		)
 		.where((table.pr_detail.isin(pr_names)) & (table.docstatus == 1))
-		.groupby(table.pr_detail)
+		.groupby(
+			parent_table.name,
+			parent_table.is_opening,
+			table.purchase_receipt,
+			table.pr_detail,
+			table.item_code,
+		)
 	)
 	invoice_data = query.run(as_dict=1)
 
 	if not invoice_data:
 		return frappe._dict()
 
+	invoice_names = {row.purchase_invoice for row in invoice_data}
+	tax_table = frappe.qb.DocType("Purchase Taxes and Charges")
+	valuation_tax_data = (
+		frappe.qb.from_(tax_table)
+		.select(tax_table.parent, tax_table.account_head)
+		.where(
+			(tax_table.parent.isin(invoice_names))
+			& (tax_table.parenttype == "Purchase Invoice")
+			& (tax_table.docstatus == 1)
+			& (tax_table.category.isin(("Valuation", "Valuation and Total")))
+			& (tax_table.base_tax_amount_after_discount_amount != 0)
+		)
+	).run(as_dict=1)
+
+	valuation_accounts_by_invoice = {}
+	for row in valuation_tax_data:
+		valuation_accounts_by_invoice.setdefault(row.parent, set()).add(row.account_head)
+
+	valuation_accounts = {
+		account for accounts in valuation_accounts_by_invoice.values() for account in accounts
+	}
+	pr_valuation_gl_accounts = get_active_pr_gl_accounts([pr_doc.name], valuation_accounts).get(
+		pr_doc.name, set()
+	)
+
+	stock_items = set(pr_doc.get_stock_items())
+	perpetual_inventory_enabled = erpnext.is_perpetual_inventory_enabled(pr_doc.company)
 	billed_qty_amt = frappe._dict()
 
 	for row in invoice_data:
 		if row.pr_detail not in billed_qty_amt:
-			billed_qty_amt[row.pr_detail] = {"amount": 0, "qty": 0}
+			billed_qty_amt[row.pr_detail] = {"amount": 0, "item_tax_amount": 0, "qty": 0}
 
 		billed_qty_amt[row.pr_detail]["amount"] += flt(row.amount)
+
+		valuation_accounts = valuation_accounts_by_invoice.get(row.purchase_invoice, set())
+		reclassified_item_tax = get_srbnb_reclassified_valuation_tax(
+			row.item_tax_amount,
+			auto_accounting_for_stock=perpetual_inventory_enabled,
+			is_opening=row.is_opening,
+			is_stock_item=row.item_code in stock_items,
+			purchase_receipt=row.purchase_receipt,
+			valuation_tax_accounts=valuation_accounts,
+			active_pr_gl_accounts=pr_valuation_gl_accounts,
+		)
+		if row.purchase_receipt == pr_doc.name and reclassified_item_tax:
+			# Mirror Purchase Invoice GL's SRBNB reclassification boundary so stock
+			# valuation and accounting move by the same amount.
+			billed_qty_amt[row.pr_detail]["item_tax_amount"] += reclassified_item_tax
+
 		billed_qty_amt[row.pr_detail]["qty"] += flt(row.qty)
 
 	return billed_qty_amt

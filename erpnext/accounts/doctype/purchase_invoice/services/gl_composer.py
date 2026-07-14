@@ -6,6 +6,10 @@ from frappe import _
 from frappe.utils import cint, flt, get_link_to_form
 
 import erpnext
+from erpnext.accounts.doctype.purchase_invoice.services.valuation_adjustment import (
+	get_active_pr_gl_accounts,
+	get_srbnb_reclassified_valuation_tax,
+)
 from erpnext.accounts.general_ledger import get_round_off_account_and_cost_center
 from erpnext.accounts.services.base_gl_composer import BaseGLComposer
 from erpnext.accounts.services.taxes import TaxService
@@ -157,6 +161,9 @@ class PurchaseInvoiceGLComposer(BaseGLComposer):
 			if d.category in ("Valuation", "Valuation and Total")
 			and flt(d.base_tax_amount_after_discount_amount)
 		]
+		active_pr_gl_accounts = get_active_pr_gl_accounts(
+			(item.purchase_receipt for item in doc.items), valuation_tax_accounts
+		)
 
 		exchange_rate_map, net_rate_map = get_purchase_document_details(doc)
 
@@ -392,51 +399,35 @@ class PurchaseInvoiceGLComposer(BaseGLComposer):
 									)
 								)
 
-			if (
-				doc.auto_accounting_for_stock
-				and doc.is_opening == "No"
-				and item.item_code in stock_items
-				and item.item_tax_amount
-			):
-				# Post reverse entry for Stock-Received-But-Not-Billed if booked in Purchase Receipt
-				if item.purchase_receipt and valuation_tax_accounts:
-					negative_expense_booked_in_pr = frappe.get_all(
-						"GL Entry",
-						filters={
-							"voucher_type": "Purchase Receipt",
-							"voucher_no": item.purchase_receipt,
-							"account": ["in", valuation_tax_accounts],
+			reclassified_item_tax = get_srbnb_reclassified_valuation_tax(
+				item.item_tax_amount,
+				auto_accounting_for_stock=doc.auto_accounting_for_stock,
+				is_opening=doc.is_opening,
+				is_stock_item=item.item_code in stock_items,
+				purchase_receipt=item.purchase_receipt,
+				valuation_tax_accounts=valuation_tax_accounts,
+				active_pr_gl_accounts=active_pr_gl_accounts.get(item.purchase_receipt, set()),
+			)
+			if reclassified_item_tax:
+				reclassified_item_tax = flt(reclassified_item_tax, item.precision("item_tax_amount"))
+				gl_entries.append(
+					self.get_gl_dict(
+						{
+							"account": doc.stock_received_but_not_billed,
+							"against": doc.supplier,
+							"debit": reclassified_item_tax,
+							"debit_in_transaction_currency": flt(
+								reclassified_item_tax / doc.conversion_rate,
+								item.precision("item_tax_amount"),
+							),
+							"remarks": doc.remarks or _("Accounting Entry for Stock"),
+							"cost_center": doc.cost_center,
+							"project": item.project or doc.project,
 						},
-						pluck="name",
+						item=item,
 					)
-
-					(
-						doc.get_company_default("asset_received_but_not_billed")
-						if item.is_fixed_asset
-						else doc.stock_received_but_not_billed
-					)
-
-					if not negative_expense_booked_in_pr:
-						gl_entries.append(
-							self.get_gl_dict(
-								{
-									"account": doc.stock_received_but_not_billed,
-									"against": doc.supplier,
-									"debit": flt(item.item_tax_amount, item.precision("item_tax_amount")),
-									"debit_in_transaction_currency": flt(
-										item.item_tax_amount / doc.conversion_rate,
-										item.precision("item_tax_amount"),
-									),
-									"remarks": doc.remarks or _("Accounting Entry for Stock"),
-									"cost_center": doc.cost_center,
-									"project": item.project or doc.project,
-								},
-								item=item,
-							)
-						)
-						doc.negative_expense_to_be_booked += flt(
-							item.item_tax_amount, item.precision("item_tax_amount")
-						)
+				)
+				doc.negative_expense_to_be_booked += reclassified_item_tax
 
 			if item.is_fixed_asset and item.landed_cost_voucher_amount:
 				self.update_net_purchase_amount_for_linked_assets(item)
